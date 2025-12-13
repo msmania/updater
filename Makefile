@@ -7,7 +7,7 @@ BINARY_NAME := updater
 CMD_DIR := ./cmd/main
 BIN_DIR := ./bin
 
-VERSION := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 
 GOFLAGS := -ldflags="-s -w -X main.version=$(VERSION)"
 

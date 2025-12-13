@@ -5,9 +5,15 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -17,21 +23,34 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Build binary
+      - name: Build binary for ${{ matrix.arch }}
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
         run: |
           make clean && make build
+          mv ./bin/updater ./bin/updater-linux-${{ matrix.arch }}
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: updater-${{ github.ref_name }}
-          path: ./bin/updater
+          name: updater-${{ github.ref_name }}-${{ matrix.arch }}
+          path: ./bin/updater-linux-${{ matrix.arch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          files: ./bin/updater
+          files: ./artifacts/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
