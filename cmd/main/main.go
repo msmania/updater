@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,74 +18,110 @@ import (
 // version is set at build time via -ldflags "-X main.version=..."
 var version = "dev"
 
-// ---------------------------------------------------------------------
-// Helper: compare semantic versions (vMAJOR.MINOR.PATCH)
-// ---------------------------------------------------------------------
-func isNewer(local, remote string) bool {
-	l := strings.TrimPrefix(local, "v")
-	r := strings.TrimPrefix(remote, "v")
-
-	// Split into core version and pre-release
-	lParts := strings.SplitN(l, "-", 2)
-	rParts := strings.SplitN(r, "-", 2)
-
-	lCore := strings.Split(lParts[0], ".")
-	rCore := strings.Split(rParts[0], ".")
-
-	// Pad core versions to 3 parts (MAJOR.MINOR.PATCH)
-	for len(lCore) < 3 {
-		lCore = append(lCore, "0")
+type (
+	PreReleaseType int
+	Prerelease     struct {
+		t       PreReleaseType
+		version int
 	}
-	for len(rCore) < 3 {
-		rCore = append(rCore, "0")
+	versionStruct struct {
+		Original string
+		Parsed   bool
+		Numbers  [3]int
+		Pre      *Prerelease
+	}
+)
+
+const (
+	PrereleaseAlpha PreReleaseType = iota
+	PrereleaseBeta
+	PrereleaseRC
+)
+
+var prereleaseTypeMap = map[string]PreReleaseType{
+	"alpha": PrereleaseAlpha,
+	"beta":  PrereleaseBeta,
+	"rc":    PrereleaseRC,
+}
+
+func (v Prerelease) Compare(other Prerelease) int {
+	if v.t != other.t {
+		return int(v.t) - int(other.t)
+	}
+	return v.version - other.version
+}
+
+func parsePreRelease(v string) *Prerelease {
+	for prefix, t := range prereleaseTypeMap {
+		v, found := strings.CutPrefix(v, prefix)
+		if found {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return nil
+			}
+			return &Prerelease{
+				t:       t,
+				version: n,
+			}
+		}
+	}
+	return nil
+}
+
+func ParseVersion(v string) versionStruct {
+	vs := versionStruct{
+		Parsed:   false,
+		Original: v,
 	}
 
-	// Compare core versions
-	for i := 0; i < 3; i++ {
-		li, err := strconv.Atoi(lCore[i])
+	v, found := strings.CutPrefix(v, "v")
+	if !found {
+		return vs
+	}
+
+	parts := strings.SplitN(v, "-", 2)
+	if len(parts) == 2 {
+		pre := parsePreRelease(parts[1])
+		if pre == nil {
+			return vs
+		}
+		vs.Pre = pre
+	}
+
+	core := strings.SplitN(parts[0], ".", 3)
+	for i, num := range core {
+		n, err := strconv.Atoi(num)
 		if err != nil {
-			// Malformed local version, assume not newer
-			return false
+			return vs
 		}
-		ri, err := strconv.Atoi(rCore[i])
-		if err != nil {
-			// Malformed remote version, assume not newer
-			return false
+		vs.Numbers[i] = n
+	}
+
+	vs.Parsed = true
+	return vs
+}
+
+func (v versionStruct) Compare(other versionStruct) (int, error) {
+	if !v.Parsed || !other.Parsed {
+		return 0, errors.New("versionStruct not parsed")
+	}
+	for i := range 3 {
+		if v.Numbers[i] > other.Numbers[i] {
+			return 1, nil
+		} else if v.Numbers[i] < other.Numbers[i] {
+			return -1, nil
 		}
-
-		if ri > li {
-			return true // Remote is newer
-		} else if ri < li {
-			return false // Local is newer or equal
-		}
 	}
-
-	// Core versions are equal, now compare pre-release parts
-	lPre := ""
-	if len(lParts) > 1 {
-		lPre = lParts[1]
+	if v.Pre == nil && other.Pre == nil {
+		return 0, nil
 	}
-	rPre := ""
-	if len(rParts) > 1 {
-		rPre = rParts[1]
+	if v.Pre == nil {
+		return 1, nil
 	}
-
-	if rPre == "" && lPre != "" {
-		// Remote is a release version, local is pre-release. Remote is newer.
-		return true
-	} else if rPre != "" && lPre == "" {
-		// Local is a release version, remote is pre-release. Local is newer.
-		return false
-	} else if rPre != "" && lPre != "" {
-		// Both are pre-release, compare lexicographically
-		// If remote pre-release is lexicographically greater, it's newer.
-		return rPre > lPre
+	if other.Pre == nil {
+		return -1, nil
 	}
-
-	// Versions are identical or local is newer/equal
-	// (e.g., both are release versions, or both pre-release and local is
-	// greater/equal)
-	return false
+	return v.Pre.Compare(*other.Pre), nil
 }
 
 // ---------------------------------------------------------------------
@@ -162,14 +199,19 @@ func maybeUpgrade(skip bool) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("cannot query latest release: %w", err)
 	}
-	if !isNewer(version, remoteTag) {
+
+	remoteVersion := ParseVersion(remoteTag)
+	localVersion := ParseVersion(version)
+	if cmp, err := remoteVersion.Compare(localVersion); err != nil ||
+		cmp <= 0 || remoteVersion.Pre != nil {
 		log.Printf(
-			"No newer version available (current=%s remote=%s)",
+			"No newer release available (current=%s remote=%s)",
 			version,
 			remoteTag,
 		)
-		return false, nil // already up‑to‑date
+		return false, nil
 	}
+
 	log.Printf("New version %s available (current=%s). Downloading…", remoteTag, version)
 	exePath, err := os.Executable()
 	if err != nil {
